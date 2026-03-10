@@ -6,7 +6,7 @@ def main_menu_kb(locale: str = "ru") -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(
             inline_keyboard=[
                 [
-                    InlineKeyboardButton(text="📔 Create deal", callback_data="menu:deal_create"),
+                    InlineKeyboardButton(text="📔 Create deal", callback_data="deal_create"),
                 ],
                 [
                     InlineKeyboardButton(text="🌟 Profile", callback_data="menu:profile"),
@@ -17,7 +17,7 @@ def main_menu_kb(locale: str = "ru") -> InlineKeyboardMarkup:
                     InlineKeyboardButton(text="🏴 Language", callback_data="menu:language"),
                 ],
                 [
-                    InlineKeyboardButton(text="💁‍♂️ Support", callback_data="menu:support"),
+                    InlineKeyboardButton(text="💁‍♂️ Support", url="https://t.me/Dirdols"),
                 ],
             ],
         )
@@ -25,7 +25,7 @@ def main_menu_kb(locale: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="📔Создать сделку", callback_data="menu:deal_create"),
+                InlineKeyboardButton(text="📔Создать сделку", callback_data="deal_create"),
             ],
             [
                 InlineKeyboardButton(text="🌟Профиль", callback_data="menu:profile"),
@@ -36,7 +36,7 @@ def main_menu_kb(locale: str = "ru") -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="🏴Язык", callback_data="menu:language"),
             ],
             [
-                InlineKeyboardButton(text="💁‍♂️Поддержка", callback_data="menu:support"),
+                InlineKeyboardButton(text="💁‍♂️Поддержка", url="https://t.me/Dirdols"),
             ],
         ],
     )
@@ -56,20 +56,45 @@ def language_choice_kb_with_origin(origin: str = "start") -> InlineKeyboardMarku
         ]
     )
 
+def language_choice_kb_with_back_to_menu(origin: str = "start") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🇷🇺 Русский", callback_data=f"lang:ru:{origin}"),
+                InlineKeyboardButton(text="🇬🇧 English", callback_data=f"lang:en:{origin}"),
+            ],
+            [InlineKeyboardButton(text="Menu/Меню", callback_data="nav")],
+        ]
+    )
+
+def about_return_to_menu(locale: str = "ru") -> InlineKeyboardMarkup:
+    if locale == "en":
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Back to menu", callback_data="nav")]
+            ]
+        )
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ В меню", callback_data="nav")]
+        ]
+    )
+
 
 def profile_kb(locale: str = "ru") -> InlineKeyboardMarkup:
     if locale == "en":
         return InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(text="📥 Requisites", callback_data="menu:requisites")],
-                [InlineKeyboardButton(text="⬅️ Back to menu", callback_data="nav:main_menu")],
+                [InlineKeyboardButton(text="⬅️ Back to menu", callback_data="nav")],
             ]
         )
 
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="📥Реквизиты", callback_data="menu:requisites")],
-            [InlineKeyboardButton(text="⬅️В меню", callback_data="nav:main_menu")],
+            [InlineKeyboardButton(text="⬅️ В меню", callback_data="nav")],
         ]
     )
 
@@ -81,7 +106,7 @@ def requisites_menu_kb(locale: str = "ru") -> InlineKeyboardMarkup:
                 [InlineKeyboardButton(text="🪙 Add/Edit TON wallet", callback_data="req:ton")],
                 [InlineKeyboardButton(text="💳 Add/Edit card", callback_data="req:card")],
                 [InlineKeyboardButton(text="🔄 Add/Edit SBP phone", callback_data="req:sbp")],
-                [InlineKeyboardButton(text="⬅️ Back", callback_data="nav:main_menu")],
+                [InlineKeyboardButton(text="⬅️ Back to menu", callback_data="nav")],
             ]
         )
 
@@ -90,7 +115,26 @@ def requisites_menu_kb(locale: str = "ru") -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🪙 Добавить/Изменить TON-кошелёк", callback_data="req:ton")],
             [InlineKeyboardButton(text="💳 Добавить/Изменить карту", callback_data="req:card")],
             [InlineKeyboardButton(text="🔄 Добавить/Изменить СБП", callback_data="req:sbp")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="nav:main_menu")],
+            [InlineKeyboardButton(text="⬅️ В меню", callback_data="nav")],
         ]
     )
 
+def select_payment_metod(locale: str = "ru", has_ton: bool = True, has_card: bool = True, has_sbp: bool = True) -> InlineKeyboardMarkup:
+    keyboard = []
+
+    if has_ton:
+        ton_text = "🪙 TON wallet" if locale == "en" else "🪙 TON-кошелёк"
+        keyboard.append([InlineKeyboardButton(text=ton_text, callback_data="deal_create:pay:ton")])
+
+    if has_card:
+        card_text = "💳 Bank card" if locale == "en" else "💳 Банковская Карта"
+        keyboard.append([InlineKeyboardButton(text=card_text, callback_data="deal_create:pay:card")])
+
+    if has_sbp:
+        sbp_text = "🔄 SBP" if locale == "en" else "🔄 СБП"
+        keyboard.append([InlineKeyboardButton(text=sbp_text, callback_data="deal_create:pay:sbp")])
+
+    back_text = "⬅️ Back to menu" if locale == "en" else "⬅️ В меню"
+    keyboard.append([InlineKeyboardButton(text=back_text, callback_data="nav:main_menu")])
+
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)

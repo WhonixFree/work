@@ -10,9 +10,9 @@ def _connect() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     return conn
 
-
 def init_db() -> None:
     with _connect() as conn:
+        # === Таблица users ===
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
@@ -27,52 +27,113 @@ def init_db() -> None:
                 ton_wallet TEXT,
                 card_number TEXT,
                 sbp_phone TEXT,
+                total_deals INTEGER NOT NULL DEFAULT 0,
+                success_deals INTEGER NOT NULL DEFAULT 0,
+                total_volume_usd REAL NOT NULL DEFAULT 0,
+                avg_rating REAL NOT NULL DEFAULT 0,
+                online_now INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             )
             """
         )
-        # Миграция для уже созданной таблицы (старые инсталлы)
+
+        # Миграции для users — добавляем колонки, если их нет
         for stmt in (
             "ALTER TABLE users ADD COLUMN locale TEXT",
             "ALTER TABLE users ADD COLUMN balance REAL NOT NULL DEFAULT 0",
             "ALTER TABLE users ADD COLUMN ton_wallet TEXT",
             "ALTER TABLE users ADD COLUMN card_number TEXT",
             "ALTER TABLE users ADD COLUMN sbp_phone TEXT",
+            "ALTER TABLE users ADD COLUMN total_deals INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN success_deals INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN total_volume_usd REAL NOT NULL DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN avg_rating REAL NOT NULL DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN online_now INTEGER NOT NULL DEFAULT 0",
         ):
             try:
                 conn.execute(stmt)
             except sqlite3.OperationalError:
-                pass
+                pass  # Колонка уже существует
 
+        # === Таблица deals (исправлено: одна таблица, все нужные колонки) ===
         conn.execute(
             """
-            CREATE TABLE IF NOT EXISTS platform_stats (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                total_deals INTEGER NOT NULL,
-                success_deals INTEGER NOT NULL,
-                total_volume_usd REAL NOT NULL,
-                avg_rating REAL NOT NULL,
-                online_now INTEGER NOT NULL
+            CREATE TABLE IF NOT EXISTS deals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                payment_method TEXT NOT NULL,
+                amount REAL NOT NULL,
+                currency TEXT NOT NULL,
+                item_description TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(tg_id)
             )
             """
         )
 
-        # Инициализация дефолтной статистики, если пусто
-        cur = conn.execute("SELECT COUNT(*) AS cnt FROM platform_stats")
-        row = cur.fetchone()
-        if not row or row["cnt"] == 0:
-            conn.execute(
-                """
-                INSERT INTO platform_stats (
-                    id, total_deals, success_deals, total_volume_usd, avg_rating, online_now
-                )
-                VALUES (1, ?, ?, ?, ?, ?)
-                """,
-                (1277, 871, 48126, 4.6, 14912),
+        # Миграции для deals — добавляем новые колонки в существующие инсталляции
+        for stmt in (
+            "ALTER TABLE deals ADD COLUMN item_description TEXT",
+            "ALTER TABLE deals ADD COLUMN updated_at TEXT",
+        ):
+            try:
+                conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass  # Колонка уже существует
+
+        # === Таблица platform_stats ===
+        conn.execute("DROP TABLE IF EXISTS platform_stats")
+        conn.execute(
+            """
+            CREATE TABLE platform_stats (
+                id INTEGER PRIMARY KEY,
+                total_deals INTEGER NOT NULL DEFAULT 0,
+                success_deals INTEGER NOT NULL DEFAULT 0,
+                total_volume_usd REAL NOT NULL DEFAULT 0,
+                avg_rating REAL NOT NULL DEFAULT 0,
+                online_now INTEGER NOT NULL DEFAULT 0
             )
+            """
+        )
+
+        # Вычисляем агрегаты по users
+        cur = conn.execute(
+            """
+            SELECT
+                SUM(total_deals) AS total_deals,
+                SUM(success_deals) AS success_deals,
+                SUM(total_volume_usd) AS total_volume_usd,
+                AVG(NULLIF(avg_rating, 0)) AS avg_rating_avg,
+                SUM(online_now) AS online_now
+            FROM users
+            """
+        )
+        row = cur.fetchone()
+
+        total_deals = int(row[0] or 0)
+        success_deals = int(row[1] or 0)
+        total_volume_usd = float(row[2] or 0.0)
+        avg_rating = float(row[3] or 0.0)
+        online_now = int(row[4] or 0)
+
+        # Вставляем агрегированную строку (UPSERT для безопасности)
+        conn.execute(
+            """
+            INSERT INTO platform_stats (id, total_deals, success_deals, total_volume_usd, avg_rating, online_now)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                total_deals = excluded.total_deals,
+                success_deals = excluded.success_deals,
+                total_volume_usd = excluded.total_volume_usd,
+                avg_rating = excluded.avg_rating,
+                online_now = excluded.online_now
+            """,
+            (1, total_deals, success_deals, total_volume_usd, avg_rating, online_now),
+        )
 
         conn.commit()
-
 
 def upsert_user(
     *,
@@ -122,7 +183,7 @@ def get_user_profile(tg_id: int) -> sqlite3.Row | None:
     with _connect() as conn:
         return conn.execute(
             """
-            SELECT id, tg_id, balance, ton_wallet, card_number, sbp_phone
+            SELECT *
             FROM users
             WHERE tg_id = ?
             """,
@@ -164,3 +225,72 @@ def get_platform_stats() -> sqlite3.Row:
         ).fetchone()
         return row
 
+def create_deal(tg_id: int, payment_method: str, amount: float, currency: str, item_description: str) -> int:
+    with _connect() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO deals (user_id, payment_method, amount, currency, item_description, status, created_at)
+            VALUES (?, ?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP)
+            """,
+            (tg_id, payment_method, amount, currency, item_description),
+        )
+        conn.commit()
+        return cursor.lastrowid
+
+def get_deal(deal_id: int, tg_id: int | None = None) -> sqlite3.Row | None:
+    with _connect() as conn:
+        if tg_id:
+            return conn.execute(
+                "SELECT * FROM deals WHERE id = ? AND user_id = ?",
+                (deal_id, tg_id),
+            ).fetchone()
+        else:
+            return conn.execute(
+                "SELECT * FROM deals WHERE id = ?",
+                (deal_id,),
+            ).fetchone()
+
+def update_deal_status(deal_id: int, status: str) -> bool:
+    with _connect() as conn:
+        cursor = conn.execute(
+            "UPDATE deals SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (status, deal_id),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+def update_user_stats(tg_id: int, deal_id: int) -> None:
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT amount, currency FROM deals 
+            WHERE id = ? AND user_id = ?
+            """,
+            (deal_id, tg_id),
+        ).fetchone()
+
+        if not row:
+            raise ValueError(f"Сделка #{deal_id} не найдена для пользователя {tg_id}")
+
+        amount = float(row["amount"])
+        currency = row["currency"]
+
+        EXCHANGE_RATES = {
+            "TON": 2.50,  # 1 TON = 2.50 USD
+            "RUB": 0.011,  # 1 RUB = 0.011 USD (~90 RUB = 1 USD)
+        }
+
+        rate = EXCHANGE_RATES.get(currency, 0.011)
+        amount_usd = amount * rate
+
+        conn.execute(
+            """
+            UPDATE users 
+            SET total_deals = total_deals + 1,
+                total_volume_usd = total_volume_usd + ?
+            WHERE tg_id = ?
+            """,
+            (amount_usd, tg_id),
+        )
+
+        conn.commit()

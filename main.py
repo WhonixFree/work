@@ -21,12 +21,19 @@ from db import (
     set_user_sbp_phone,
     set_user_ton_wallet,
     upsert_user,
+    create_deal,
+    get_deal,
+    update_deal_status,
+    update_user_stats,
 )
 from keyboards import (
     language_choice_kb_with_origin,
     main_menu_kb,
     profile_kb,
     requisites_menu_kb,
+    about_return_to_menu,
+    language_choice_kb_with_back_to_menu,
+    select_payment_metod,
 )
 
 
@@ -84,6 +91,13 @@ class RequisitesForm(StatesGroup):
     card = State()
     sbp = State()
 
+class DealForm(StatesGroup):
+    choose_method = State()
+    ton_amount = State()
+    card_amount = State()
+    sbp_amount = State()
+    item_description = State()
+    confirm = State()
 
 RE_TON = re.compile(r"^(?:EQ|UQ)[A-Za-z0-9_-]{46}$")
 RE_CARD = re.compile(r"^\d{16}$")
@@ -106,13 +120,16 @@ def render_profile(locale: str, profile) -> str:
     ton = profile["ton_wallet"] or None
     card = profile["card_number"] or None
     sbp = profile["sbp_phone"] or None
+    rating = profile["avg_rating"] or 0
+    total_Deals = profile["total_deals"] or 0
+    success_deals = profile["success_deals"] or 0
 
     if locale == "en":
         return (
             f"{t(locale, 'profile_title')}\n\n"
             f"🆔 Unique ID: {user_id}\n"
             f"💰 Balance: {balance:.1f} ₽\n"
-            f"⭐ Rating: ★★★★★ (5.0/5) | Deals total: 0 | Successful: 0\n\n"
+            f"⭐ Rating: ★★★★★ ({rating}/5) | Deals total: {total_Deals} | Successful: {success_deals}\n\n"
             f"💰 Payout requisites:\n"
             f"🪙 TON wallet: {'❌ Not set' if not ton else ton}\n"
             f"💳 Card: {'❌ Not set' if not card else card}\n"
@@ -123,7 +140,7 @@ def render_profile(locale: str, profile) -> str:
         f"{t(locale, 'profile_title')}\n\n"
         f"🆔 Уникальный ID: {user_id}\n"
         f"💰 Баланс: {balance:.1f} ₽\n"
-        f"⭐ Рейтинг: ★★★★★ (5.0/5) | Всего сделок: 0 | Успешных: 0\n\n"
+        f"⭐ Рейтинг: ★★★★★ ({rating}/5) | Всего сделок:  {total_Deals} | Успешных: {success_deals}\n\n"
         f"💰 Реквизиты для выплат:\n"
         f"🪙 TON-кошелек: {'❌ Не указан' if not ton else ton}\n"
         f"💳 Карта: {'❌ Не указана' if not card else card}\n"
@@ -175,7 +192,6 @@ def render_about(locale: str) -> str:
         "• 📞 24/7 Поддержка\n"
         "• ⭐️ 99.8% положительных отзывов"
     )
-
 
 async def on_start(message: Message) -> None:
     upsert_user(
@@ -231,7 +247,7 @@ async def on_menu_click(callback: CallbackQuery) -> None:
         return
 
     if callback.data == "menu:language":
-        await callback.message.answer(t(locale, "choose_lang"), reply_markup=language_choice_kb_with_origin("menu"))
+        await callback.message.answer(t(locale, "choose_lang"), reply_markup=language_choice_kb_with_back_to_menu("menu"))
         return
 
     if callback.data == "menu:profile":
@@ -254,7 +270,7 @@ async def on_menu_click(callback: CallbackQuery) -> None:
         return
 
     if callback.data == "menu:about":
-        await callback.message.answer(render_about(locale), reply_markup=main_menu_kb(locale))
+        await callback.message.answer(render_about(locale), reply_markup=about_return_to_menu(locale))
         return
 
     await callback.message.answer(t(locale, "section_wip"), reply_markup=main_menu_kb(locale))
@@ -323,14 +339,272 @@ async def on_enter_sbp(message: Message, state: FSMContext) -> None:
         await message.answer(render_profile(locale, profile), reply_markup=profile_kb(locale))
 
 
+async def on_deal_create(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if not callback.from_user or not callback.message:
+        return
+
+    locale = get_user_locale(callback.from_user.id) or guess_locale_from_tg(callback.from_user.language_code)
+
+    profile = get_user_profile(callback.from_user.id)
+    if not profile:
+        await callback.message.answer(
+            "❌ Ошибка профиля. Попробуйте позже." if locale == "ru"
+            else "❌ Profile error. Please try again later."
+        )
+        return
+
+    has_ton = profile["ton_wallet"] is not None
+    has_card = profile["card_number"] is not None
+    has_sbp = profile["sbp_phone"] is not None
+
+    if callback.data == "deal_create":
+        await state.clear()
+
+        if not (has_ton or has_card or has_sbp):
+            if locale == "en":
+                await callback.message.answer(
+                    "⚠️ You need to add at least one payment method before creating a deal.\n\n"
+                    "Add:\n"
+                    "• TON wallet, or\n"
+                    "• Card number, or\n"
+                    "• SBP phone number",
+                    reply_markup=requisites_menu_kb(locale)
+                )
+            else:
+                await callback.message.answer(
+                    "⚠️ Перед созданием сделки нужно добавить хотя бы один метод оплаты.\n\n"
+                    "Добавьте:\n"
+                    "• TON-кошелёк, или\n"
+                    "• Номер карты, или\n"
+                    "• Номер СБП",
+                    reply_markup=requisites_menu_kb(locale)
+                )
+            return
+
+        await callback.message.answer(make_order(locale),
+                                      reply_markup=select_payment_metod(locale, has_ton, has_card, has_sbp))
+        return
+
+    if callback.data == "deal_create:pay:ton":
+        if not has_ton:
+            await callback.answer("❌ TON-кошелёк не добавлен!", show_alert=True)
+            return
+        await state.set_state(DealForm.ton_amount)
+        await callback.message.answer("💰 Введите сумму в TON:")
+        return
+
+    if callback.data == "deal_create:pay:card":
+        if not has_card:
+            await callback.answer("❌ Карта не добавлена!", show_alert=True)
+            return
+        await state.set_state(DealForm.card_amount)
+        await callback.message.answer("💰 Введите сумму в рублях:")
+        return
+
+    if callback.data == "deal_create:pay:sbp":
+        if not has_sbp:
+            await callback.answer("❌ СБП не добавлен!", show_alert=True)
+            return
+        await state.set_state(DealForm.sbp_amount)
+        await callback.message.answer("💰 Введите сумму для СБП:")
+        return
+
+def make_order(locale: str) -> str:
+    if locale == "en":
+        return "💰 Select payment method:"
+
+    return "💰 Выберите метод оплаты:"
+
+async def on_enter_payment_amount(message: Message, state: FSMContext) -> None:
+    locale = get_user_locale(message.from_user.id) or guess_locale_from_tg(message.from_user.language_code)
+
+    current_state = await state.get_state()
+    method_map = {
+        DealForm.ton_amount.state: ("ton", "TON"),
+        DealForm.card_amount.state: ("card", "RUB"),
+        DealForm.sbp_amount.state: ("sbp", "RUB"),
+    }
+
+    method_info = method_map.get(current_state)
+    if not method_info:
+        await state.clear()
+        await message.answer(t(locale, "section_wip"), reply_markup=main_menu_kb(locale))
+        return
+
+    payment_method, currency = method_info
+
+    try:
+        amount_str = (message.text or "").strip().replace(",", ".")
+        amount = float(amount_str)
+        if amount <= 0:
+            raise ValueError
+        if payment_method == "ton":
+            if "." in amount_str and len(amount_str.split(".")[-1]) > 9:
+                raise ValueError("Too many decimals for TON")
+    except (ValueError, TypeError):
+        error_text = (
+            "❌ Invalid amount. Enter a positive number (e.g., 100 or 10.5)."
+            if locale == "en"
+            else "❌ Неверная сумма. Введите положительное число (например, 100 или 10.5)."
+        )
+        if payment_method == "ton":
+            error_text = (
+                "❌ Invalid TON amount. Use up to 9 decimals (e.g., 1.5 or 0.123456789)."
+                if locale == "en"
+                else "❌ Неверная сумма TON. Используйте до 9 знаков после запятой (например, 1.5 или 0.123456789)."
+            )
+        await message.answer(error_text)
+        return
+
+    await state.update_data(
+        amount=amount,
+        payment_method=payment_method,
+        currency=currency
+    )
+
+    await state.set_state(DealForm.item_description)
+
+    amount_display = f"{amount:.9f}".rstrip("0").rstrip(".") if payment_method == "ton" else f"{amount:.2f}"
+    currency_symbol = "TON" if payment_method == "ton" else "₽"
+
+    if locale == "en":
+        prompt_text = (
+            f"📝 Specify what you are offering in this deal for {amount_display} {currency_symbol}\n\n"
+            f"Example:\n"
+            f"https://t.me/nft/PlushPepe-1\n"
+            f"https://t.me/nft/DurovsCap-1"
+        )
+    else:
+        prompt_text = (
+            f"📝 Укажите, что вы предлагаете в этой сделке за {amount_display} {currency_symbol}\n\n"
+            f"Пример:\n"
+            f"https://t.me/nft/PlushPepe-1\n"
+            f"https://t.me/nft/DurovsCap-1"
+        )
+
+    await message.answer(prompt_text)
+
+
+async def on_enter_deal_item(message: Message, state: FSMContext) -> None:
+    locale = get_user_locale(message.from_user.id) or guess_locale_from_tg(message.from_user.language_code)
+
+    item_text = (message.text or "").strip()
+    if not item_text:
+        await message.answer(
+            "❌ Please send a valid link or description." if locale == "en"
+            else "❌ Отправьте корректную ссылку или описание."
+        )
+        return
+
+    await state.update_data(item_description=item_text)
+
+    data = await state.get_data()
+    amount = data.get("amount")
+    payment_method = data.get("payment_method")
+    currency = data.get("currency")
+    item = data.get("item_description")
+
+    amount_display = f"{amount:.9f}".rstrip("0").rstrip(".") if payment_method == "ton" else f"{amount:.2f}"
+    currency_symbol = "TON" if payment_method == "ton" else "₽"
+
+    await state.set_state(DealForm.confirm)
+
+    if locale == "en":
+        confirmation_text = (
+            f"📋 Deal confirmation\n\n"
+            f"💰 Amount: {amount_display} {currency_symbol}\n"
+            f"🔄 Payment method: {payment_method.upper()}\n"
+            f"🎁 Your offer: {item}\n\n"
+            f"Please confirm the deal:"
+        )
+        confirm_btn = "✅ Confirm deal"
+        cancel_btn = "❌ Cancel"
+    else:
+        confirmation_text = (
+            f"📋 Подтверждение сделки\n\n"
+            f"💰 Сумма: {amount_display} {currency_symbol}\n"
+            f"🔄 Способ оплаты: {payment_method.upper()}\n"
+            f"🎁 Ваш товар: {item}\n\n"
+            f"Подтверждаете сделку?"
+        )
+        confirm_btn = "✅ Подтвердить сделку"
+        cancel_btn = "❌ Отмена"
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=confirm_btn, callback_data="deal:confirm:yes")],
+        [InlineKeyboardButton(text=cancel_btn, callback_data="deal:confirm:no")],
+    ])
+
+    await message.answer(confirmation_text, reply_markup=keyboard)
+
+
+async def on_deal_confirm(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if not callback.from_user or not callback.message:
+        return
+
+    locale = get_user_locale(callback.from_user.id) or guess_locale_from_tg(callback.from_user.language_code)
+    data = await state.get_data()
+
+    if callback.data == "deal:confirm:yes":
+        try:
+            deal_id = create_deal(
+                tg_id=callback.from_user.id,
+                payment_method=data["payment_method"],
+                amount=data["amount"],
+                currency=data["currency"],
+                item_description=data["item_description"],
+            )
+
+            amount = data["amount"]
+            payment_method = data["payment_method"]
+            amount_display = f"{amount:.9f}".rstrip("0").rstrip(".") if payment_method == "ton" else f"{amount:.2f}"
+            currency_symbol = "TON" if payment_method == "ton" else "₽"
+
+            success_text = (
+                f"✅ Сделка #{deal_id} успешно создана!\n\n"
+                f"💰 Сумма: {amount_display} {currency_symbol}\n"
+                f"🔄 Оплата: {payment_method.upper()}\n"
+                f"🎁 Товар: {data['item_description']}\n\n"
+                f"Ожидайте подтверждения от контрагента. Статус можно проверить в разделе «Мои сделки»."
+                if locale == "ru"
+                else f"✅ Deal #{deal_id} created successfully!\n\n"
+                     f"💰 Amount: {amount_display} {currency_symbol}\n"
+                     f"🔄 Payment: {payment_method.upper()}\n"
+                     f"🎁 Item: {data['item_description']}\n\n"
+                     f"Waiting for counterparty confirmation. Check status in «My deals» section."
+            )
+            await callback.message.answer(success_text)
+
+        except Exception as e:
+            logging.error(f"Failed to create deal for user {callback.from_user.id}: {e}")
+            await callback.message.answer(
+                "❌ Произошла ошибка при создании сделки. Попробуйте позже." if locale == "ru"
+                else "❌ Failed to create deal. Please try again later."
+            )
+    else:
+        await callback.message.answer(
+            "❌ Сделка отменена." if locale == "ru" else "❌ Deal cancelled."
+        )
+
+    await state.clear()
+    await callback.message.answer(t(locale, "main_menu"), reply_markup=main_menu_kb(locale))
+
+async def on_nav_back(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if not callback.from_user or not callback.message:
+        return
+    locale = get_user_locale(callback.from_user.id) or guess_locale_from_tg(callback.from_user.language_code)
+    await callback.message.answer(t(locale, "main_menu"), reply_markup=main_menu_kb(locale))
+
 async def main() -> None:
     logging.basicConfig(level=logging.INFO)
 
     load_dotenv()
 
-    token = os.getenv("BOT_TOKEN")
-    if not token:
-        raise RuntimeError("Не найден BOT_TOKEN в переменных окружения")
+    token = "8798624773:AAEdDIzIyKgtguK1Kdko-diKumYowuD8CD0"
 
     init_db()
 
@@ -344,6 +618,14 @@ async def main() -> None:
     dp.message.register(on_enter_ton, RequisitesForm.ton)
     dp.message.register(on_enter_card, RequisitesForm.card)
     dp.message.register(on_enter_sbp, RequisitesForm.sbp)
+    dp.callback_query.register(on_nav_back, F.data == "nav")
+    dp.callback_query.register(on_deal_create,F.data.startswith("deal_create"))
+    dp.callback_query.register(on_deal_confirm, F.data.startswith("deal:confirm:"))
+
+    dp.message.register(on_enter_payment_amount, DealForm.ton_amount)
+    dp.message.register(on_enter_payment_amount, DealForm.card_amount)
+    dp.message.register(on_enter_payment_amount, DealForm.sbp_amount)
+    dp.message.register(on_enter_deal_item, DealForm.item_description)
 
     await dp.start_polling(bot)
 
