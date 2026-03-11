@@ -198,6 +198,32 @@ def get_user_profile(tg_id: int) -> sqlite3.Row | None:
         ).fetchone()
 
 
+def credit_user_balance(tg_id: int, amount: float) -> float | None:
+    """
+    Увеличивает баланс пользователя на amount.
+    Возвращает новый баланс или None, если пользователь не найден.
+    """
+    if amount <= 0:
+        raise ValueError("amount must be positive")
+    with _connect() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE users
+            SET balance = balance + ?
+            WHERE tg_id = ?
+            """,
+            (amount, tg_id),
+        )
+        if cursor.rowcount <= 0:
+            return None
+        row = conn.execute(
+            "SELECT balance FROM users WHERE tg_id = ?",
+            (tg_id,),
+        ).fetchone()
+        conn.commit()
+        return float(row["balance"]) if row else None
+
+
 def debit_user_balance(tg_id: int, amount: float) -> float | None:
     """
     Atomically subtracts amount from user balance if sufficient.

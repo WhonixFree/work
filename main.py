@@ -2,9 +2,10 @@ import asyncio
 import logging
 import os
 import re
+from collections import defaultdict
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, Command
 from aiogram.types import CallbackQuery, Message
 from dotenv import load_dotenv
 from aiogram.fsm.context import FSMContext
@@ -16,6 +17,7 @@ from db import (
     get_user_locale,
     get_user_profile,
     debit_user_balance,
+    credit_user_balance,
     init_db,
     set_user_card_number,
     set_user_locale,
@@ -41,6 +43,7 @@ from keyboards import (
 )
 
 TON_RATE_RUB = 250.0
+CHAT_HISTORY: dict[int, set[int]] = defaultdict(set)
 
 
 TEXTS: dict[str, dict[str, str]] = {
@@ -209,6 +212,60 @@ async def safe_delete_message(message: Message | None) -> None:
         # Игнорируем любые ошибки удаления (например, уже удалено)
         pass
 
+
+async def send_user_message(message: Message, text: str, reply_markup=None) -> Message:
+    """
+    Отправляет одно актуальное сообщение от бота пользователю:
+    перед отправкой удаляет все ранее сохранённые сообщения (и бота, и пользователя)
+    в этом чате, включая текущее пользовательское сообщение.
+    """
+    if not message.from_user:
+        return await message.answer(text, reply_markup=reply_markup)
+
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+
+    # Добавляем текущее сообщение пользователя в историю на удаление
+    CHAT_HISTORY[chat_id].add(message.message_id)
+
+    # Удаляем все старые сообщения в этом чате, которые мы помним
+    for msg_id in list(CHAT_HISTORY[chat_id]):
+        try:
+            await message.bot.delete_message(chat_id, msg_id)
+        except Exception:
+            pass
+    CHAT_HISTORY[chat_id].clear()
+
+    # Отправляем новое сообщение бота и запоминаем его id
+    sent = await message.answer(text, reply_markup=reply_markup)
+    CHAT_HISTORY[chat_id].add(sent.message_id)
+    return sent
+
+
+async def send_callback_message(callback: CallbackQuery, text: str, reply_markup=None) -> Message:
+    """
+    Аналог send_user_message, но для колбеков:
+    удаляем все запомненные сообщения в этом чате (включая сообщение с кнопкой),
+    затем шлём новое сообщение бота.
+    """
+    if not callback.message or not callback.from_user:
+        return await callback.message.answer(text, reply_markup=reply_markup)  # type: ignore[union-attr]
+
+    chat_id = callback.message.chat.id
+    # Добавляем сообщение с кнопкой в историю
+    CHAT_HISTORY[chat_id].add(callback.message.message_id)
+
+    for msg_id in list(CHAT_HISTORY[chat_id]):
+        try:
+            await callback.message.bot.delete_message(chat_id, msg_id)
+        except Exception:
+            pass
+    CHAT_HISTORY[chat_id].clear()
+
+    sent = await callback.message.answer(text, reply_markup=reply_markup)
+    CHAT_HISTORY[chat_id].add(sent.message_id)
+    return sent
+
 async def on_start(message: Message) -> None:
     upsert_user(
         tg_id=message.from_user.id,
@@ -227,7 +284,7 @@ async def on_start(message: Message) -> None:
         public_id = payload[len("deal="):].strip()
         deal = get_deal_by_public_id(public_id)
         if not deal:
-            await message.answer("❌ Сделка не найдена или ссылка неверная.")
+            await send_user_message(message, "❌ Сделка не найдена или ссылка неверная.")
             return
 
         status = (deal["status"] or "").lower()
@@ -237,7 +294,8 @@ async def on_start(message: Message) -> None:
             amount_display = f"{amount:.9f}".rstrip("0").rstrip(".") if currency == "TON" else f"{amount:.2f}"
             currency_symbol = "TON" if currency == "TON" else ("₽" if currency == "RUB" else currency or "—")
             item = (deal["item_description"] or "").strip() or "."
-            await message.answer(
+            await send_user_message(
+                message,
                 f"🛒 Сделка {public_id}\n"
                 f"📋 Товар: {item}\n"
                 f"💵 Сумма: {amount_display} {currency_symbol}\n\n"
@@ -247,7 +305,7 @@ async def on_start(message: Message) -> None:
 
         seller_profile = get_user_profile(int(deal["user_id"]))
         if not seller_profile:
-            await message.answer("❌ Продавец не найден. Попробуйте позже.")
+            await send_user_message(message, "❌ Продавец не найден. Попробуйте позже.")
             return
 
         attach_buyer_to_deal(public_id, message.from_user.id)
@@ -287,15 +345,15 @@ async def on_start(message: Message) -> None:
             f"💰 Сумма к оплате: {amount_display} {currency_symbol}\n\n"
             f"⚠️ После оплаты нажмите кнопку подтверждения"
         )
-        await message.answer(text_out, reply_markup=buyer_deal_confirm_kb(public_id))
+        await send_user_message(message, text_out, reply_markup=buyer_deal_confirm_kb(public_id))
         return
 
     locale = get_user_locale(message.from_user.id)
     if not locale:
-        await message.answer(t("ru", "choose_lang"), reply_markup=language_choice_kb_with_origin("start"))
+        await send_user_message(message, t("ru", "choose_lang"), reply_markup=language_choice_kb_with_origin("start"))
         return
 
-    await message.answer(t(locale, "welcome"), reply_markup=main_menu_kb(locale))
+    await send_user_message(message, t(locale, "welcome"), reply_markup=main_menu_kb(locale))
 
 
 async def on_language_choose(callback: CallbackQuery) -> None:
@@ -320,7 +378,7 @@ async def on_language_choose(callback: CallbackQuery) -> None:
 
     if callback.message:
         key = "main_menu" if origin == "menu" else "welcome"
-        await callback.message.answer(t(locale, key), reply_markup=main_menu_kb(locale))
+        await send_callback_message(callback, t(locale, key), reply_markup=main_menu_kb(locale))
 
 
 async def on_menu_click(callback: CallbackQuery) -> None:
@@ -331,11 +389,15 @@ async def on_menu_click(callback: CallbackQuery) -> None:
     locale = get_user_locale(callback.from_user.id) or guess_locale_from_tg(callback.from_user.language_code)
 
     if callback.data == "nav:main_menu":
-        await callback.message.answer(t(locale, "main_menu"), reply_markup=main_menu_kb(locale))
+        await send_callback_message(callback, t(locale, "main_menu"), reply_markup=main_menu_kb(locale))
         return
 
     if callback.data == "menu:language":
-        await callback.message.answer(t(locale, "choose_lang"), reply_markup=language_choice_kb_with_back_to_menu("menu"))
+        await send_callback_message(
+            callback,
+            t(locale, "choose_lang"),
+            reply_markup=language_choice_kb_with_back_to_menu("menu"),
+        )
         return
 
     if callback.data == "menu:profile":
@@ -350,18 +412,26 @@ async def on_menu_click(callback: CallbackQuery) -> None:
             )
             profile = get_user_profile(callback.from_user.id)
         if profile:
-            await callback.message.answer(render_profile(locale, profile), reply_markup=profile_kb(locale))
+            await send_callback_message(callback, render_profile(locale, profile), reply_markup=profile_kb(locale))
         return
 
     if callback.data == "menu:requisites":
-        await callback.message.answer(t(locale, "requisites_choose"), reply_markup=requisites_menu_kb(locale))
+        await send_callback_message(
+            callback,
+            t(locale, "requisites_choose"),
+            reply_markup=requisites_menu_kb(locale),
+        )
         return
 
     if callback.data == "menu:about":
-        await callback.message.answer(render_about(locale), reply_markup=about_return_to_menu(locale))
+        await send_callback_message(
+            callback,
+            render_about(locale),
+            reply_markup=about_return_to_menu(locale),
+        )
         return
 
-    await callback.message.answer(t(locale, "section_wip"), reply_markup=main_menu_kb(locale))
+    await send_callback_message(callback, t(locale, "section_wip"), reply_markup=main_menu_kb(locale))
 
 
 async def on_requisites_action(callback: CallbackQuery, state: FSMContext) -> None:
@@ -373,15 +443,15 @@ async def on_requisites_action(callback: CallbackQuery, state: FSMContext) -> No
 
     if callback.data == "req:ton":
         await state.set_state(RequisitesForm.ton)
-        await callback.message.answer(t(locale, "enter_ton"))
+        await send_callback_message(callback, t(locale, "enter_ton"))
         return
     if callback.data == "req:card":
         await state.set_state(RequisitesForm.card)
-        await callback.message.answer(t(locale, "enter_card"))
+        await send_callback_message(callback, t(locale, "enter_card"))
         return
     if callback.data == "req:sbp":
         await state.set_state(RequisitesForm.sbp)
-        await callback.message.answer(t(locale, "enter_sbp"))
+        await send_callback_message(callback, t(locale, "enter_sbp"))
         return
 
 
@@ -389,42 +459,42 @@ async def on_enter_ton(message: Message, state: FSMContext) -> None:
     locale = get_user_locale(message.from_user.id) or guess_locale_from_tg(message.from_user.language_code)
     value = (message.text or "").strip()
     if not RE_TON.fullmatch(value):
-        await message.answer(t(locale, "invalid_ton"))
+        await send_user_message(message, t(locale, "invalid_ton"))
         return
     set_user_ton_wallet(message.from_user.id, value)
     await state.clear()
-    await message.answer(t(locale, "saved"))
+    await send_user_message(message, t(locale, "saved"))
     profile = get_user_profile(message.from_user.id)
     if profile:
-        await message.answer(render_profile(locale, profile), reply_markup=profile_kb(locale))
+        await send_user_message(message, render_profile(locale, profile), reply_markup=profile_kb(locale))
 
 
 async def on_enter_card(message: Message, state: FSMContext) -> None:
     locale = get_user_locale(message.from_user.id) or guess_locale_from_tg(message.from_user.language_code)
     value = (message.text or "").strip().replace(" ", "")
     if not is_mir_card(value):
-        await message.answer(t(locale, "invalid_card"))
+        await send_user_message(message, t(locale, "invalid_card"))
         return
     set_user_card_number(message.from_user.id, value)
     await state.clear()
-    await message.answer(t(locale, "saved"))
+    await send_user_message(message, t(locale, "saved"))
     profile = get_user_profile(message.from_user.id)
     if profile:
-        await message.answer(render_profile(locale, profile), reply_markup=profile_kb(locale))
+        await send_user_message(message, render_profile(locale, profile), reply_markup=profile_kb(locale))
 
 
 async def on_enter_sbp(message: Message, state: FSMContext) -> None:
     locale = get_user_locale(message.from_user.id) or guess_locale_from_tg(message.from_user.language_code)
     value = (message.text or "").strip().replace(" ", "")
     if not RE_SBP.fullmatch(value):
-        await message.answer(t(locale, "invalid_sbp"))
+        await send_user_message(message, t(locale, "invalid_sbp"))
         return
     set_user_sbp_phone(message.from_user.id, value)
     await state.clear()
-    await message.answer(t(locale, "saved"))
+    await send_user_message(message, t(locale, "saved"))
     profile = get_user_profile(message.from_user.id)
     if profile:
-        await message.answer(render_profile(locale, profile), reply_markup=profile_kb(locale))
+        await send_user_message(message, render_profile(locale, profile), reply_markup=profile_kb(locale))
 
 
 async def on_deal_create(callback: CallbackQuery, state: FSMContext) -> None:
@@ -432,15 +502,14 @@ async def on_deal_create(callback: CallbackQuery, state: FSMContext) -> None:
     if not callback.from_user or not callback.message:
         return
 
-    await safe_delete_message(callback.message)
-
     locale = get_user_locale(callback.from_user.id) or guess_locale_from_tg(callback.from_user.language_code)
 
     profile = get_user_profile(callback.from_user.id)
     if not profile:
-        await callback.message.answer(
+        await send_callback_message(
+            callback,
             "❌ Ошибка профиля. Попробуйте позже." if locale == "ru"
-            else "❌ Profile error. Please try again later."
+            else "❌ Profile error. Please try again later.",
         )
         return
 
@@ -453,27 +522,32 @@ async def on_deal_create(callback: CallbackQuery, state: FSMContext) -> None:
 
         if not (has_ton or has_card or has_sbp):
             if locale == "en":
-                await callback.message.answer(
+                await send_callback_message(
+                    callback,
                     "⚠️ You need to add at least one payment method before creating a deal.\n\n"
                     "Add:\n"
                     "• TON wallet, or\n"
                     "• Card number, or\n"
                     "• SBP phone number",
-                    reply_markup=requisites_menu_kb(locale)
+                    reply_markup=requisites_menu_kb(locale),
                 )
             else:
-                await callback.message.answer(
+                await send_callback_message(
+                    callback,
                     "⚠️ Перед созданием сделки нужно добавить хотя бы один метод оплаты.\n\n"
                     "Добавьте:\n"
                     "• TON-кошелёк, или\n"
                     "• Номер карты, или\n"
                     "• Номер СБП",
-                    reply_markup=requisites_menu_kb(locale)
+                    reply_markup=requisites_menu_kb(locale),
                 )
             return
 
-        await callback.message.answer(make_order(locale),
-                                      reply_markup=select_payment_metod(locale, has_ton, has_card, has_sbp))
+        await send_callback_message(
+            callback,
+            make_order(locale),
+            reply_markup=select_payment_metod(locale, has_ton, has_card, has_sbp),
+        )
         return
 
     if callback.data == "deal_create:pay:ton":
@@ -481,7 +555,7 @@ async def on_deal_create(callback: CallbackQuery, state: FSMContext) -> None:
             await callback.answer("❌ TON-кошелёк не добавлен!", show_alert=True)
             return
         await state.set_state(DealForm.ton_amount)
-        await callback.message.answer("💰 Введите сумму в TON:")
+        await send_callback_message(callback, "💰 Введите сумму в TON:")
         return
 
     if callback.data == "deal_create:pay:card":
@@ -489,7 +563,7 @@ async def on_deal_create(callback: CallbackQuery, state: FSMContext) -> None:
             await callback.answer("❌ Карта не добавлена!", show_alert=True)
             return
         await state.set_state(DealForm.card_amount)
-        await callback.message.answer("💰 Введите сумму в рублях:")
+        await send_callback_message(callback, "💰 Введите сумму в рублях:")
         return
 
     if callback.data == "deal_create:pay:sbp":
@@ -497,7 +571,7 @@ async def on_deal_create(callback: CallbackQuery, state: FSMContext) -> None:
             await callback.answer("❌ СБП не добавлен!", show_alert=True)
             return
         await state.set_state(DealForm.sbp_amount)
-        await callback.message.answer("💰 Введите сумму для СБП:")
+        await send_callback_message(callback, "💰 Введите сумму для СБП:")
         return
 
 def make_order(locale: str) -> str:
@@ -519,7 +593,7 @@ async def on_enter_payment_amount(message: Message, state: FSMContext) -> None:
     method_info = method_map.get(current_state)
     if not method_info:
         await state.clear()
-        await message.answer(t(locale, "section_wip"), reply_markup=main_menu_kb(locale))
+        await send_user_message(message, t(locale, "section_wip"), reply_markup=main_menu_kb(locale))
         return
 
     payment_method, currency = method_info
@@ -544,7 +618,7 @@ async def on_enter_payment_amount(message: Message, state: FSMContext) -> None:
                 if locale == "en"
                 else "❌ Неверная сумма TON. Используйте до 9 знаков после запятой (например, 1.5 или 0.123456789)."
             )
-        await message.answer(error_text)
+        await send_user_message(message, error_text)
         return
 
     await state.update_data(
@@ -573,7 +647,7 @@ async def on_enter_payment_amount(message: Message, state: FSMContext) -> None:
             f"https://t.me/nft/DurovsCap-1"
         )
 
-    await message.answer(prompt_text)
+    await send_user_message(message, prompt_text)
 
 
 async def on_enter_deal_item(message: Message, state: FSMContext) -> None:
@@ -581,9 +655,10 @@ async def on_enter_deal_item(message: Message, state: FSMContext) -> None:
 
     item_text = (message.text or "").strip()
     if not item_text:
-        await message.answer(
+        await send_user_message(
+            message,
             "❌ Please send a valid link or description." if locale == "en"
-            else "❌ Отправьте корректную ссылку или описание."
+            else "❌ Отправьте корректную ссылку или описание.",
         )
         return
 
@@ -627,7 +702,7 @@ async def on_enter_deal_item(message: Message, state: FSMContext) -> None:
         [InlineKeyboardButton(text=cancel_btn, callback_data="deal:confirm:no")],
     ])
 
-    await message.answer(confirmation_text, reply_markup=keyboard)
+    await send_user_message(message, confirmation_text, reply_markup=keyboard)
 
 
 async def on_deal_confirm(callback: CallbackQuery, state: FSMContext) -> None:
@@ -637,8 +712,6 @@ async def on_deal_confirm(callback: CallbackQuery, state: FSMContext) -> None:
 
     locale = get_user_locale(callback.from_user.id) or guess_locale_from_tg(callback.from_user.language_code)
     data = await state.get_data()
-
-    await safe_delete_message(callback.message)
 
     if callback.data == "deal:confirm:yes":
         try:
@@ -686,19 +759,21 @@ async def on_deal_confirm(callback: CallbackQuery, state: FSMContext) -> None:
                     success_text += "⚠️ Can't determine bot username for link. Set `BOT_USERNAME` in `.env`.\n\n"
                 success_text += "Waiting for counterparty confirmation. Check status in «My deals» section."
 
-            await callback.message.answer(success_text, reply_markup=about_return_to_menu(locale))
+            await send_callback_message(callback, success_text, reply_markup=about_return_to_menu(locale))
 
         except Exception as e:
             logging.error(f"Failed to create deal for user {callback.from_user.id}: {e}")
-            await callback.message.answer(
+            await send_callback_message(
+                callback,
                 "❌ Произошла ошибка при создании сделки. Попробуйте позже." if locale == "ru"
-                else "❌ Failed to create deal. Please try again later."
+                else "❌ Failed to create deal. Please try again later.",
             )
         await state.clear()
         return
 
     # Отмена сделки
-    await callback.message.answer(
+    await send_callback_message(
+        callback,
         "❌ Сделка отменена." if locale == "ru" else "❌ Deal cancelled.",
         reply_markup=about_return_to_menu(locale),
     )
@@ -716,14 +791,12 @@ async def on_buyer_paid(callback: CallbackQuery) -> None:
     public_id = data.split(":", 1)[1] if ":" in data else ""
     public_id = public_id.strip()
     if not public_id:
-        await callback.message.answer("❌ Некорректная сделка.")
+        await send_callback_message(callback, "❌ Некорректная сделка.")
         return
-
-    await safe_delete_message(callback.message)
 
     deal = get_deal_by_public_id(public_id)
     if not deal:
-        await callback.message.answer("❌ Сделка не найдена.")
+        await send_callback_message(callback, "❌ Сделка не найдена.")
         return
 
     status = (deal["status"] or "").lower()
@@ -733,11 +806,12 @@ async def on_buyer_paid(callback: CallbackQuery) -> None:
         amount_display = f"{amount:.9f}".rstrip("0").rstrip(".") if currency == "TON" else f"{amount:.2f}"
         currency_label = "TON" if currency == "TON" else ("₽" if currency == "RUB" else (currency or "—"))
         item = (deal["item_description"] or "").strip() or "."
-        await callback.message.answer(
+        await send_callback_message(
+            callback,
             f"🛒 Сделка {public_id}\n"
             f"📋 Товар: {item}\n"
             f"💵 Сумма: {amount_display} {currency_label}\n\n"
-            f"✅ Сделка уже оплачена и завершена."
+            f"✅ Сделка уже оплачена и завершена.",
         )
         return
 
@@ -753,7 +827,8 @@ async def on_buyer_paid(callback: CallbackQuery) -> None:
     debit_amount_rub = amount * TON_RATE_RUB if currency == "TON" else amount
     new_balance = debit_user_balance(callback.from_user.id, debit_amount_rub)
     if new_balance is None:
-        await callback.message.answer(
+        await send_callback_message(
+            callback,
             "❌ Недостаточно средств на балансе!\n\n"
             f"💰 Ваш баланс: {buyer_balance:.1f} ₽\n"
             f"💵 Сумма к оплате: {amount_display} {currency_label}",
@@ -763,7 +838,8 @@ async def on_buyer_paid(callback: CallbackQuery) -> None:
 
     update_deal_status(int(deal["id"]), "completed")
 
-    await callback.message.answer(
+    await send_callback_message(
+        callback,
         "✅ Продавец уведомлен об оплате. Ожидайте передачи товара.\n\n"
         f"💰 Ваш баланс: {new_balance:.1f} ₽",
         reply_markup=about_return_to_menu(locale),
@@ -771,6 +847,7 @@ async def on_buyer_paid(callback: CallbackQuery) -> None:
 
     item = (deal["item_description"] or "").strip() or "."
     try:
+        seller_locale = get_user_locale(int(deal["user_id"])) or "ru"
         await callback.bot.send_message(
             int(deal["user_id"]),
             "💰 Покупатель  оплатил сделку!\n\n"
@@ -779,17 +856,65 @@ async def on_buyer_paid(callback: CallbackQuery) -> None:
             f"Товар: {item}\n\n"
             "✅ Покупатель оплатил товар, средства списаны с его баланса и зарезервированы.\n\n"
             "‼️ Передайте товар администратору XPay @Dirdols, после вам будут автоматически перечислены деньги на реквизиты указанные в профиле!\n\n"
-            "❌ Внимание: в случае передачи подарка на аккаунт покупателя, средства будут заморожены и сделка будет отменена, если покупатель просит передать нфт на его аккаунт - это мошенник!"
+            "❌ Внимание: в случае передачи подарка на аккаунт покупателя, средства будут заморожены и сделка будет отменена, если покупатель просит передать нфт на его аккаунт - это мошенник!",
+            reply_markup=about_return_to_menu(seller_locale),
         )
     except Exception as e:
         logging.warning(f"Failed to notify seller for deal {public_id}: {e}")
+
+
+async def on_add_money(message: Message) -> None:
+    if not message.from_user:
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        await send_user_message(
+            message,
+            "❌ Укажите сумму после команды, например: /money 50000",
+        )
+        return
+
+    try:
+        amount = float(parts[1])
+        if amount <= 0:
+            raise ValueError
+    except ValueError:
+        await send_user_message(
+            message,
+            "❌ Неверная сумма. Используйте положительное число, например: /money 50000",
+        )
+        return
+
+    # гарантируем, что пользователь есть в БД
+    upsert_user(
+        tg_id=message.from_user.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+        last_name=message.from_user.last_name,
+        language_code=message.from_user.language_code,
+    )
+
+    new_balance = credit_user_balance(message.from_user.id, amount)
+    if new_balance is None:
+        await send_user_message(
+            message,
+            "❌ Не удалось обновить баланс. Попробуйте позже.",
+        )
+        return
+
+    await send_user_message(
+        message,
+        f"💰 На ваш счёт зачислено {amount:.1f} ₽\n\n"
+        f"💼 Текущий баланс: {new_balance:.1f} ₽",
+    )
 
 async def on_nav_back(callback: CallbackQuery) -> None:
     await callback.answer()
     if not callback.from_user or not callback.message:
         return
     locale = get_user_locale(callback.from_user.id) or guess_locale_from_tg(callback.from_user.language_code)
-    await callback.message.answer(t(locale, "main_menu"), reply_markup=main_menu_kb(locale))
+    await send_callback_message(callback, t(locale, "main_menu"), reply_markup=main_menu_kb(locale))
 
 async def main() -> None:
     logging.basicConfig(level=logging.INFO)
@@ -806,6 +931,7 @@ async def main() -> None:
     dp = Dispatcher(storage=MemoryStorage())
 
     dp.message.register(on_start, CommandStart())
+    dp.message.register(on_add_money, Command("money"))
     dp.callback_query.register(on_language_choose, F.data.startswith("lang:"))
     dp.callback_query.register(on_menu_click, F.data.startswith("menu:"))
     dp.callback_query.register(on_requisites_action, F.data.startswith("req:"))
