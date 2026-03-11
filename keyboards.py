@@ -135,6 +135,14 @@ def select_payment_metod(locale: str = "ru", has_ton: bool = True, has_card: boo
         keyboard.append([InlineKeyboardButton(text=sbp_text, callback_data="deal_create:pay:sbp")])
 
     back_text = "⬅️ Back to menu" if locale == "en" else "⬅️ В меню"
-    keyboard.append([InlineKeyboardButton(text=back_text, callback_data="nav:main_menu")])
+    keyboard.append([InlineKeyboardButton(text=back_text, callback_data="nav")])
 
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def buyer_deal_confirm_kb(public_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Я оплатил", callback_data=f"deal_buyer_paid:{public_id}")],
+        ]
+    )

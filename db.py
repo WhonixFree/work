@@ -1,4 +1,6 @@
 import sqlite3
+import secrets
+import string
 from pathlib import Path
 
 
@@ -19,6 +21,7 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 tg_id INTEGER NOT NULL UNIQUE,
                 username TEXT,
+                first_name TEXT,
                 first_name TEXT,
                 last_name TEXT,
                 language_code TEXT,
@@ -60,7 +63,9 @@ def init_db() -> None:
             """
             CREATE TABLE IF NOT EXISTS deals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                public_id TEXT UNIQUE,
                 user_id INTEGER NOT NULL,
+                buyer_id INTEGER,
                 payment_method TEXT NOT NULL,
                 amount REAL NOT NULL,
                 currency TEXT NOT NULL,
@@ -75,6 +80,8 @@ def init_db() -> None:
 
         # Миграции для deals — добавляем новые колонки в существующие инсталляции
         for stmt in (
+            "ALTER TABLE deals ADD COLUMN public_id TEXT",
+            "ALTER TABLE deals ADD COLUMN buyer_id INTEGER",
             "ALTER TABLE deals ADD COLUMN item_description TEXT",
             "ALTER TABLE deals ADD COLUMN updated_at TEXT",
         ):
@@ -191,6 +198,32 @@ def get_user_profile(tg_id: int) -> sqlite3.Row | None:
         ).fetchone()
 
 
+def debit_user_balance(tg_id: int, amount: float) -> float | None:
+    """
+    Atomically subtracts amount from user balance if sufficient.
+    Returns new balance on success, or None if insufficient funds / user not found.
+    """
+    if amount <= 0:
+        raise ValueError("amount must be positive")
+    with _connect() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE users
+            SET balance = balance - ?
+            WHERE tg_id = ? AND balance >= ?
+            """,
+            (amount, tg_id, amount),
+        )
+        if cursor.rowcount <= 0:
+            return None
+        row = conn.execute(
+            "SELECT balance FROM users WHERE tg_id = ?",
+            (tg_id,),
+        ).fetchone()
+        conn.commit()
+        return float(row["balance"]) if row else None
+
+
 def set_user_ton_wallet(tg_id: int, ton_wallet: str) -> None:
     with _connect() as conn:
         conn.execute(
@@ -225,17 +258,30 @@ def get_platform_stats() -> sqlite3.Row:
         ).fetchone()
         return row
 
-def create_deal(tg_id: int, payment_method: str, amount: float, currency: str, item_description: str) -> int:
+_ALPHABET = string.ascii_lowercase + string.digits
+
+
+def _gen_public_id(length: int = 8) -> str:
+    return "".join(secrets.choice(_ALPHABET) for _ in range(length))
+
+
+def create_deal(tg_id: int, payment_method: str, amount: float, currency: str, item_description: str) -> tuple[int, str]:
     with _connect() as conn:
-        cursor = conn.execute(
-            """
-            INSERT INTO deals (user_id, payment_method, amount, currency, item_description, status, created_at)
-            VALUES (?, ?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP)
-            """,
-            (tg_id, payment_method, amount, currency, item_description),
-        )
-        conn.commit()
-        return cursor.lastrowid
+        public_id = _gen_public_id()
+        for _ in range(10):
+            try:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO deals (public_id, user_id, payment_method, amount, currency, item_description, status, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP)
+                    """,
+                    (public_id, tg_id, payment_method, amount, currency, item_description),
+                )
+                conn.commit()
+                return cursor.lastrowid, public_id
+            except sqlite3.IntegrityError:
+                public_id = _gen_public_id()
+        raise RuntimeError("Не удалось сгенерировать уникальный public_id для сделки")
 
 def get_deal(deal_id: int, tg_id: int | None = None) -> sqlite3.Row | None:
     with _connect() as conn:
@@ -249,6 +295,28 @@ def get_deal(deal_id: int, tg_id: int | None = None) -> sqlite3.Row | None:
                 "SELECT * FROM deals WHERE id = ?",
                 (deal_id,),
             ).fetchone()
+
+
+def get_deal_by_public_id(public_id: str) -> sqlite3.Row | None:
+    with _connect() as conn:
+        return conn.execute(
+            "SELECT * FROM deals WHERE public_id = ?",
+            (public_id,),
+        ).fetchone()
+
+
+def attach_buyer_to_deal(public_id: str, buyer_tg_id: int) -> bool:
+    with _connect() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE deals
+            SET buyer_id = COALESCE(buyer_id, ?), updated_at = CURRENT_TIMESTAMP
+            WHERE public_id = ?
+            """,
+            (buyer_tg_id, public_id),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
 
 def update_deal_status(deal_id: int, status: str) -> bool:
     with _connect() as conn:

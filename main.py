@@ -15,6 +15,7 @@ from db import (
     get_platform_stats,
     get_user_locale,
     get_user_profile,
+    debit_user_balance,
     init_db,
     set_user_card_number,
     set_user_locale,
@@ -23,6 +24,8 @@ from db import (
     upsert_user,
     create_deal,
     get_deal,
+    get_deal_by_public_id,
+    attach_buyer_to_deal,
     update_deal_status,
     update_user_stats,
 )
@@ -34,7 +37,10 @@ from keyboards import (
     about_return_to_menu,
     language_choice_kb_with_back_to_menu,
     select_payment_metod,
+    buyer_deal_confirm_kb,
 )
+
+TON_RATE_RUB = 250.0
 
 
 TEXTS: dict[str, dict[str, str]] = {
@@ -193,6 +199,16 @@ def render_about(locale: str) -> str:
         "• ⭐️ 99.8% положительных отзывов"
     )
 
+
+async def safe_delete_message(message: Message | None) -> None:
+    if not message:
+        return
+    try:
+        await message.delete()
+    except Exception:
+        # Игнорируем любые ошибки удаления (например, уже удалено)
+        pass
+
 async def on_start(message: Message) -> None:
     upsert_user(
         tg_id=message.from_user.id,
@@ -201,6 +217,78 @@ async def on_start(message: Message) -> None:
         last_name=message.from_user.last_name,
         language_code=message.from_user.language_code,
     )
+
+    # Deep-link: /start deal=<public_id>
+    text = (message.text or "").strip()
+    payload = ""
+    if " " in text:
+        payload = text.split(" ", 1)[1].strip()
+    if payload.startswith("deal="):
+        public_id = payload[len("deal="):].strip()
+        deal = get_deal_by_public_id(public_id)
+        if not deal:
+            await message.answer("❌ Сделка не найдена или ссылка неверная.")
+            return
+
+        status = (deal["status"] or "").lower()
+        if status in ("completed", "paid", "done", "success"):
+            amount = float(deal["amount"])
+            currency = (deal["currency"] or "").strip()
+            amount_display = f"{amount:.9f}".rstrip("0").rstrip(".") if currency == "TON" else f"{amount:.2f}"
+            currency_symbol = "TON" if currency == "TON" else ("₽" if currency == "RUB" else currency or "—")
+            item = (deal["item_description"] or "").strip() or "."
+            await message.answer(
+                f"🛒 Сделка {public_id}\n"
+                f"📋 Товар: {item}\n"
+                f"💵 Сумма: {amount_display} {currency_symbol}\n\n"
+                f"✅ Сделка уже оплачена и завершена."
+            )
+            return
+
+        seller_profile = get_user_profile(int(deal["user_id"]))
+        if not seller_profile:
+            await message.answer("❌ Продавец не найден. Попробуйте позже.")
+            return
+
+        attach_buyer_to_deal(public_id, message.from_user.id)
+
+        rating = float(seller_profile["avg_rating"] or 0.0)
+        total_deals = int(seller_profile["total_deals"] or 0)
+        success_deals = int(seller_profile["success_deals"] or 0)
+        stars = "★" * 5
+
+        payment_method = (deal["payment_method"] or "").lower()
+        requisites_lines: list[str] = []
+        if payment_method == "ton":
+            requisites_lines.append(f"🪙 TON: {seller_profile['ton_wallet'] or '❌ Не указано'}")
+        elif payment_method == "card":
+            requisites_lines.append(f"💳 Карта: {seller_profile['card_number'] or '❌ Не указано'}")
+        elif payment_method == "sbp":
+            requisites_lines.append(f"🔄 СБП: {seller_profile['sbp_phone'] or '❌ Не указано'}")
+        else:
+            requisites_lines.append("❓ Реквизиты: не определены")
+
+        amount = float(deal["amount"])
+        currency = (deal["currency"] or "").strip()
+        amount_display = f"{amount:.9f}".rstrip("0").rstrip(".") if currency == "TON" else f"{amount:.2f}"
+        currency_symbol = "TON" if currency == "TON" else ("₽" if currency == "RUB" else currency or "—")
+
+        item = (deal["item_description"] or "").strip() or "."
+
+        text_out = (
+            f"🛒 Сделка {public_id}\n"
+            f"⭐ Рейтинг продавца: {stars} ({rating:.1f}/5) | Всего сделок: {total_deals} | Успешных: {success_deals}\n\n"
+            f"📦 Тип: {payment_method.upper() if payment_method else '—'}\n"
+            f"📋 Товар: {item}\n"
+            f"💵 Сумма: {amount_display} {currency_symbol}\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"💳 Реквизиты для оплаты:\n"
+            + "\n".join(requisites_lines) + "\n\n"
+            f"💰 Сумма к оплате: {amount_display} {currency_symbol}\n\n"
+            f"⚠️ После оплаты нажмите кнопку подтверждения"
+        )
+        await message.answer(text_out, reply_markup=buyer_deal_confirm_kb(public_id))
+        return
 
     locale = get_user_locale(message.from_user.id)
     if not locale:
@@ -343,6 +431,8 @@ async def on_deal_create(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     if not callback.from_user or not callback.message:
         return
+
+    await safe_delete_message(callback.message)
 
     locale = get_user_locale(callback.from_user.id) or guess_locale_from_tg(callback.from_user.language_code)
 
@@ -548,9 +638,11 @@ async def on_deal_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     locale = get_user_locale(callback.from_user.id) or guess_locale_from_tg(callback.from_user.language_code)
     data = await state.get_data()
 
+    await safe_delete_message(callback.message)
+
     if callback.data == "deal:confirm:yes":
         try:
-            deal_id = create_deal(
+            deal_id, public_id = create_deal(
                 tg_id=callback.from_user.id,
                 payment_method=data["payment_method"],
                 amount=data["amount"],
@@ -563,20 +655,38 @@ async def on_deal_confirm(callback: CallbackQuery, state: FSMContext) -> None:
             amount_display = f"{amount:.9f}".rstrip("0").rstrip(".") if payment_method == "ton" else f"{amount:.2f}"
             currency_symbol = "TON" if payment_method == "ton" else "₽"
 
-            success_text = (
-                f"✅ Сделка #{deal_id} успешно создана!\n\n"
-                f"💰 Сумма: {amount_display} {currency_symbol}\n"
-                f"🔄 Оплата: {payment_method.upper()}\n"
-                f"🎁 Товар: {data['item_description']}\n\n"
-                f"Ожидайте подтверждения от контрагента. Статус можно проверить в разделе «Мои сделки»."
-                if locale == "ru"
-                else f"✅ Deal #{deal_id} created successfully!\n\n"
-                     f"💰 Amount: {amount_display} {currency_symbol}\n"
-                     f"🔄 Payment: {payment_method.upper()}\n"
-                     f"🎁 Item: {data['item_description']}\n\n"
-                     f"Waiting for counterparty confirmation. Check status in «My deals» section."
-            )
-            await callback.message.answer(success_text)
+            me = await callback.bot.get_me()
+            bot_username = me.username or os.getenv("BOT_USERNAME") or ""
+            deal_link = ""
+            if bot_username:
+                deal_link = f"https://t.me/{bot_username}?start=deal={public_id}"
+
+            if locale == "ru":
+                success_text = (
+                    f"✅ Сделка #{deal_id} успешно создана!\n\n"
+                    f"💰 Сумма: {amount_display} {currency_symbol}\n"
+                    f"🔄 Оплата: {payment_method.upper()}\n"
+                    f"🎁 Товар: {data['item_description']}\n\n"
+                )
+                if deal_link:
+                    success_text += f"🔗 Ссылка для покупателя:\n{deal_link}\n\n"
+                else:
+                    success_text += "⚠️ Не удалось определить username бота для ссылки. Задай `BOT_USERNAME` в `.env`.\n\n"
+                success_text += "Ожидайте подтверждения от контрагента. Статус можно проверить в разделе «Мои сделки»."
+            else:
+                success_text = (
+                    f"✅ Deal #{deal_id} created successfully!\n\n"
+                    f"💰 Amount: {amount_display} {currency_symbol}\n"
+                    f"🔄 Payment: {payment_method.upper()}\n"
+                    f"🎁 Item: {data['item_description']}\n\n"
+                )
+                if deal_link:
+                    success_text += f"🔗 Link for buyer:\n{deal_link}\n\n"
+                else:
+                    success_text += "⚠️ Can't determine bot username for link. Set `BOT_USERNAME` in `.env`.\n\n"
+                success_text += "Waiting for counterparty confirmation. Check status in «My deals» section."
+
+            await callback.message.answer(success_text, reply_markup=about_return_to_menu(locale))
 
         except Exception as e:
             logging.error(f"Failed to create deal for user {callback.from_user.id}: {e}")
@@ -584,13 +694,95 @@ async def on_deal_confirm(callback: CallbackQuery, state: FSMContext) -> None:
                 "❌ Произошла ошибка при создании сделки. Попробуйте позже." if locale == "ru"
                 else "❌ Failed to create deal. Please try again later."
             )
-    else:
-        await callback.message.answer(
-            "❌ Сделка отменена." if locale == "ru" else "❌ Deal cancelled."
-        )
+        await state.clear()
+        return
 
+    # Отмена сделки
+    await callback.message.answer(
+        "❌ Сделка отменена." if locale == "ru" else "❌ Deal cancelled.",
+        reply_markup=about_return_to_menu(locale),
+    )
     await state.clear()
-    await callback.message.answer(t(locale, "main_menu"), reply_markup=main_menu_kb(locale))
+
+
+async def on_buyer_paid(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if not callback.from_user or not callback.message:
+        return
+
+    locale = get_user_locale(callback.from_user.id) or guess_locale_from_tg(callback.from_user.language_code)
+
+    data = callback.data or ""
+    public_id = data.split(":", 1)[1] if ":" in data else ""
+    public_id = public_id.strip()
+    if not public_id:
+        await callback.message.answer("❌ Некорректная сделка.")
+        return
+
+    await safe_delete_message(callback.message)
+
+    deal = get_deal_by_public_id(public_id)
+    if not deal:
+        await callback.message.answer("❌ Сделка не найдена.")
+        return
+
+    status = (deal["status"] or "").lower()
+    if status in ("completed", "paid", "done", "success"):
+        amount = float(deal["amount"])
+        currency = (deal["currency"] or "").strip()
+        amount_display = f"{amount:.9f}".rstrip("0").rstrip(".") if currency == "TON" else f"{amount:.2f}"
+        currency_label = "TON" if currency == "TON" else ("₽" if currency == "RUB" else (currency or "—"))
+        item = (deal["item_description"] or "").strip() or "."
+        await callback.message.answer(
+            f"🛒 Сделка {public_id}\n"
+            f"📋 Товар: {item}\n"
+            f"💵 Сумма: {amount_display} {currency_label}\n\n"
+            f"✅ Сделка уже оплачена и завершена."
+        )
+        return
+
+    attach_buyer_to_deal(public_id, callback.from_user.id)
+
+    buyer_profile = get_user_profile(callback.from_user.id)
+    buyer_balance = float(buyer_profile["balance"] or 0.0) if buyer_profile else 0.0
+    amount = float(deal["amount"])
+    currency = (deal["currency"] or "").strip()
+    amount_display = f"{amount:.9f}".rstrip("0").rstrip(".") if currency == "TON" else f"{amount:.2f}"
+    currency_label = "TON" if currency == "TON" else ("₽" if currency == "RUB" else (currency or "—"))
+
+    debit_amount_rub = amount * TON_RATE_RUB if currency == "TON" else amount
+    new_balance = debit_user_balance(callback.from_user.id, debit_amount_rub)
+    if new_balance is None:
+        await callback.message.answer(
+            "❌ Недостаточно средств на балансе!\n\n"
+            f"💰 Ваш баланс: {buyer_balance:.1f} ₽\n"
+            f"💵 Сумма к оплате: {amount_display} {currency_label}",
+            reply_markup=about_return_to_menu(locale),
+        )
+        return
+
+    update_deal_status(int(deal["id"]), "completed")
+
+    await callback.message.answer(
+        "✅ Продавец уведомлен об оплате. Ожидайте передачи товара.\n\n"
+        f"💰 Ваш баланс: {new_balance:.1f} ₽",
+        reply_markup=about_return_to_menu(locale),
+    )
+
+    item = (deal["item_description"] or "").strip() or "."
+    try:
+        await callback.bot.send_message(
+            int(deal["user_id"]),
+            "💰 Покупатель  оплатил сделку!\n\n"
+            f"ID сделки: {public_id}\n"
+            f"Сумма: {amount_display} {currency_label}\n"
+            f"Товар: {item}\n\n"
+            "✅ Покупатель оплатил товар, средства списаны с его баланса и зарезервированы.\n\n"
+            "‼️ Передайте товар администратору XPay @Dirdols, после вам будут автоматически перечислены деньги на реквизиты указанные в профиле!\n\n"
+            "❌ Внимание: в случае передачи подарка на аккаунт покупателя, средства будут заморожены и сделка будет отменена, если покупатель просит передать нфт на его аккаунт - это мошенник!"
+        )
+    except Exception as e:
+        logging.warning(f"Failed to notify seller for deal {public_id}: {e}")
 
 async def on_nav_back(callback: CallbackQuery) -> None:
     await callback.answer()
@@ -604,7 +796,9 @@ async def main() -> None:
 
     load_dotenv()
 
-    token = "8798624773:AAEdDIzIyKgtguK1Kdko-diKumYowuD8CD0"
+    token = os.getenv("BOT_TOKEN") or os.getenv("TOKEN") or "8798624773:AAEdDIzIyKgtguK1Kdko-diKumYowuD8CD0"
+    if not token:
+        raise RuntimeError("BOT_TOKEN не задан в окружении/.env")
 
     init_db()
 
@@ -621,6 +815,7 @@ async def main() -> None:
     dp.callback_query.register(on_nav_back, F.data == "nav")
     dp.callback_query.register(on_deal_create,F.data.startswith("deal_create"))
     dp.callback_query.register(on_deal_confirm, F.data.startswith("deal:confirm:"))
+    dp.callback_query.register(on_buyer_paid, F.data.startswith("deal_buyer_paid:"))
 
     dp.message.register(on_enter_payment_amount, DealForm.ton_amount)
     dp.message.register(on_enter_payment_amount, DealForm.card_amount)
