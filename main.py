@@ -42,10 +42,12 @@ from keyboards import (
     buyer_deal_confirm_kb,
 )
 
+# === Глобальные константы и хранилище состояния сообщений ===
 TON_RATE_RUB = 250.0
 CHAT_HISTORY: dict[int, set[int]] = defaultdict(set)
 
 
+# === Многоязычные текстовые константы бота ===
 TEXTS: dict[str, dict[str, str]] = {
     "ru": {
         "choose_lang": "Выбери язык / Choose language",
@@ -80,10 +82,12 @@ TEXTS: dict[str, dict[str, str]] = {
 }
 
 
+# === Утилита для получения перевода текста по ключу ===
 def t(locale: str, key: str) -> str:
     return TEXTS.get(locale, TEXTS["ru"]).get(key, key)
 
 
+# === Определение локали пользователя по коду языка Telegram ===
 def guess_locale_from_tg(language_code: str | None) -> str:
     if not language_code:
         return "ru"
@@ -95,11 +99,14 @@ def guess_locale_from_tg(language_code: str | None) -> str:
     return "ru"
 
 
+# === FSM состояния для работы с реквизитами ===
 class RequisitesForm(StatesGroup):
     ton = State()
     card = State()
     sbp = State()
 
+
+# === FSM состояния для создания сделки ===
 class DealForm(StatesGroup):
     choose_method = State()
     ton_amount = State()
@@ -108,11 +115,14 @@ class DealForm(StatesGroup):
     item_description = State()
     confirm = State()
 
+
+# === Регулярные выражения для валидации реквизитов ===
 RE_TON = re.compile(r"^(?:EQ|UQ)[A-Za-z0-9_-]{46}$")
 RE_CARD = re.compile(r"^\d{16}$")
 RE_SBP = re.compile(r"^(?:\+7|8)\d{10}$")
 
 
+# === Проверка, что карта относится к платёжной системе МИР ===
 def is_mir_card(number: str) -> bool:
     if not RE_CARD.fullmatch(number):
         return False
@@ -123,6 +133,7 @@ def is_mir_card(number: str) -> bool:
     return 220000 <= bin_code <= 220499
 
 
+# === Формирование текста профиля пользователя ===
 def render_profile(locale: str, profile) -> str:
     user_id = profile["id"]
     balance = float(profile["balance"] or 0)
@@ -157,10 +168,12 @@ def render_profile(locale: str, profile) -> str:
     )
 
 
+# === Форматирование целых чисел с пробелами-разделителями ===
 def format_int_with_space(value: int) -> str:
     return f"{value:,}".replace(",", " ")
 
 
+# === Формирование текста раздела «О сервисе / Статистика» ===
 def render_about(locale: str) -> str:
     stats = get_platform_stats()
     total_deals = int(stats["total_deals"])
@@ -203,16 +216,17 @@ def render_about(locale: str) -> str:
     )
 
 
+# === Безопасное удаление сообщения (игнорируем ошибки) ===
 async def safe_delete_message(message: Message | None) -> None:
     if not message:
         return
     try:
         await message.delete()
     except Exception:
-        # Игнорируем любые ошибки удаления (например, уже удалено)
         pass
 
 
+# === Отправка сообщения пользователю с очисткой истории чата ===
 async def send_user_message(message: Message, text: str, reply_markup=None) -> Message:
     """
     Отправляет одно актуальное сообщение от бота пользователю:
@@ -242,6 +256,7 @@ async def send_user_message(message: Message, text: str, reply_markup=None) -> M
     return sent
 
 
+# === Отправка сообщения по колбеку с очисткой истории чата ===
 async def send_callback_message(callback: CallbackQuery, text: str, reply_markup=None) -> Message:
     """
     Аналог send_user_message, но для колбеков:
@@ -266,6 +281,8 @@ async def send_callback_message(callback: CallbackQuery, text: str, reply_markup
     CHAT_HISTORY[chat_id].add(sent.message_id)
     return sent
 
+
+# === Обработка команды /start и deep-link для сделок ===
 async def on_start(message: Message) -> None:
     upsert_user(
         tg_id=message.from_user.id,
@@ -353,9 +370,10 @@ async def on_start(message: Message) -> None:
         await send_user_message(message, t("ru", "choose_lang"), reply_markup=language_choice_kb_with_origin("start"))
         return
 
-    await send_user_message(message, t(locale, "welcome"), reply_markup=main_menu_kb(locale))
+        await send_user_message(message, t(locale, "welcome"), reply_markup=main_menu_kb(locale))
 
 
+# === Обработка выбора языка из инлайн-клавиатуры ===
 async def on_language_choose(callback: CallbackQuery) -> None:
     await callback.answer()
     if not callback.from_user:
@@ -381,6 +399,7 @@ async def on_language_choose(callback: CallbackQuery) -> None:
         await send_callback_message(callback, t(locale, key), reply_markup=main_menu_kb(locale))
 
 
+# === Обработка кликов по пунктам главного меню ===
 async def on_menu_click(callback: CallbackQuery) -> None:
     await callback.answer()
     if not callback.from_user or not callback.message:
@@ -434,6 +453,7 @@ async def on_menu_click(callback: CallbackQuery) -> None:
     await send_callback_message(callback, t(locale, "section_wip"), reply_markup=main_menu_kb(locale))
 
 
+# === Обработка выбора действия с реквизитами в профиле ===
 async def on_requisites_action(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     if not callback.from_user or not callback.message:
@@ -455,6 +475,7 @@ async def on_requisites_action(callback: CallbackQuery, state: FSMContext) -> No
         return
 
 
+# === Обработка ввода TON-кошелька пользователем ===
 async def on_enter_ton(message: Message, state: FSMContext) -> None:
     locale = get_user_locale(message.from_user.id) or guess_locale_from_tg(message.from_user.language_code)
     value = (message.text or "").strip()
@@ -469,6 +490,7 @@ async def on_enter_ton(message: Message, state: FSMContext) -> None:
         await send_user_message(message, render_profile(locale, profile), reply_markup=profile_kb(locale))
 
 
+# === Обработка ввода номера банковской карты пользователем ===
 async def on_enter_card(message: Message, state: FSMContext) -> None:
     locale = get_user_locale(message.from_user.id) or guess_locale_from_tg(message.from_user.language_code)
     value = (message.text or "").strip().replace(" ", "")
@@ -483,6 +505,7 @@ async def on_enter_card(message: Message, state: FSMContext) -> None:
         await send_user_message(message, render_profile(locale, profile), reply_markup=profile_kb(locale))
 
 
+# === Обработка ввода телефона СБП пользователем ===
 async def on_enter_sbp(message: Message, state: FSMContext) -> None:
     locale = get_user_locale(message.from_user.id) or guess_locale_from_tg(message.from_user.language_code)
     value = (message.text or "").strip().replace(" ", "")
@@ -497,6 +520,7 @@ async def on_enter_sbp(message: Message, state: FSMContext) -> None:
         await send_user_message(message, render_profile(locale, profile), reply_markup=profile_kb(locale))
 
 
+# === Обработка создания новой сделки (выбор метода оплаты) ===
 async def on_deal_create(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     if not callback.from_user or not callback.message:
@@ -574,12 +598,16 @@ async def on_deal_create(callback: CallbackQuery, state: FSMContext) -> None:
         await send_callback_message(callback, "💰 Введите сумму для СБП:")
         return
 
+
+# === Текст выбора метода оплаты при создании сделки ===
 def make_order(locale: str) -> str:
     if locale == "en":
         return "💰 Select payment method:"
 
     return "💰 Выберите метод оплаты:"
 
+
+# === Обработка ввода суммы для сделки (TON / карта / СБП) ===
 async def on_enter_payment_amount(message: Message, state: FSMContext) -> None:
     locale = get_user_locale(message.from_user.id) or guess_locale_from_tg(message.from_user.language_code)
 
@@ -650,6 +678,7 @@ async def on_enter_payment_amount(message: Message, state: FSMContext) -> None:
     await send_user_message(message, prompt_text)
 
 
+# === Обработка ввода описания товара/ссылки в сделке ===
 async def on_enter_deal_item(message: Message, state: FSMContext) -> None:
     locale = get_user_locale(message.from_user.id) or guess_locale_from_tg(message.from_user.language_code)
 
@@ -705,6 +734,7 @@ async def on_enter_deal_item(message: Message, state: FSMContext) -> None:
     await send_user_message(message, confirmation_text, reply_markup=keyboard)
 
 
+# === Обработка подтверждения или отмены создания сделки продавцом ===
 async def on_deal_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     if not callback.from_user or not callback.message:
@@ -780,6 +810,7 @@ async def on_deal_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
 
 
+# === Обработка подтверждения оплаты сделки покупателем ===
 async def on_buyer_paid(callback: CallbackQuery) -> None:
     await callback.answer()
     if not callback.from_user or not callback.message:
@@ -863,6 +894,7 @@ async def on_buyer_paid(callback: CallbackQuery) -> None:
         logging.warning(f"Failed to notify seller for deal {public_id}: {e}")
 
 
+# === Обработка команды пополнения баланса /money ===
 async def on_add_money(message: Message) -> None:
     if not message.from_user:
         return
@@ -909,6 +941,8 @@ async def on_add_money(message: Message) -> None:
         f"💼 Текущий баланс: {new_balance:.1f} ₽",
     )
 
+
+# === Обработка кнопки «Назад в меню» ===
 async def on_nav_back(callback: CallbackQuery) -> None:
     await callback.answer()
     if not callback.from_user or not callback.message:
@@ -916,12 +950,14 @@ async def on_nav_back(callback: CallbackQuery) -> None:
     locale = get_user_locale(callback.from_user.id) or guess_locale_from_tg(callback.from_user.language_code)
     await send_callback_message(callback, t(locale, "main_menu"), reply_markup=main_menu_kb(locale))
 
+
+# === Точка входа: инициализация бота и регистрация хендлеров ===
 async def main() -> None:
     logging.basicConfig(level=logging.INFO)
 
     load_dotenv()
 
-    token = os.getenv("BOT_TOKEN") or os.getenv("TOKEN") or "8798624773:AAEdDIzIyKgtguK1Kdko-diKumYowuD8CD0"
+    token = os.getenv("BOT_TOKEN") or os.getenv("TOKEN")
     if not token:
         raise RuntimeError("BOT_TOKEN не задан в окружении/.env")
 
@@ -930,23 +966,25 @@ async def main() -> None:
     bot = Bot(token=token)
     dp = Dispatcher(storage=MemoryStorage())
 
+    # === Регистрация хендлеров сообщений ===
     dp.message.register(on_start, CommandStart())
     dp.message.register(on_add_money, Command("money"))
-    dp.callback_query.register(on_language_choose, F.data.startswith("lang:"))
-    dp.callback_query.register(on_menu_click, F.data.startswith("menu:"))
-    dp.callback_query.register(on_requisites_action, F.data.startswith("req:"))
     dp.message.register(on_enter_ton, RequisitesForm.ton)
     dp.message.register(on_enter_card, RequisitesForm.card)
     dp.message.register(on_enter_sbp, RequisitesForm.sbp)
-    dp.callback_query.register(on_nav_back, F.data == "nav")
-    dp.callback_query.register(on_deal_create,F.data.startswith("deal_create"))
-    dp.callback_query.register(on_deal_confirm, F.data.startswith("deal:confirm:"))
-    dp.callback_query.register(on_buyer_paid, F.data.startswith("deal_buyer_paid:"))
-
     dp.message.register(on_enter_payment_amount, DealForm.ton_amount)
     dp.message.register(on_enter_payment_amount, DealForm.card_amount)
     dp.message.register(on_enter_payment_amount, DealForm.sbp_amount)
     dp.message.register(on_enter_deal_item, DealForm.item_description)
+
+    # === Регистрация хендлеров callback_query ===
+    dp.callback_query.register(on_language_choose, F.data.startswith("lang:"))
+    dp.callback_query.register(on_menu_click, F.data.startswith("menu:"))
+    dp.callback_query.register(on_requisites_action, F.data.startswith("req:"))
+    dp.callback_query.register(on_nav_back, F.data == "nav")
+    dp.callback_query.register(on_deal_create, F.data.startswith("deal_create"))
+    dp.callback_query.register(on_deal_confirm, F.data.startswith("deal:confirm:"))
+    dp.callback_query.register(on_buyer_paid, F.data.startswith("deal_buyer_paid:"))
 
     await dp.start_polling(bot)
 

@@ -4,6 +4,7 @@ import string
 from pathlib import Path
 
 
+# === Путь к базе данных и вспомогательная функция подключения ===
 DB_PATH = Path(__file__).with_name("bot.sqlite3")
 
 
@@ -12,6 +13,8 @@ def _connect() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     return conn
 
+
+# === Инициализация схемы БД и миграции ===
 def init_db() -> None:
     with _connect() as conn:
         # === Таблица users ===
@@ -21,7 +24,6 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 tg_id INTEGER NOT NULL UNIQUE,
                 username TEXT,
-                first_name TEXT,
                 first_name TEXT,
                 last_name TEXT,
                 language_code TEXT,
@@ -58,7 +60,7 @@ def init_db() -> None:
             except sqlite3.OperationalError:
                 pass  # Колонка уже существует
 
-        # === Таблица deals (исправлено: одна таблица, все нужные колонки) ===
+        # === Таблица deals (основная таблица сделок) ===
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS deals (
@@ -90,7 +92,7 @@ def init_db() -> None:
             except sqlite3.OperationalError:
                 pass  # Колонка уже существует
 
-        # === Таблица platform_stats ===
+        # === Таблица platform_stats (агрегированная статистика по пользователям) ===
         conn.execute("DROP TABLE IF EXISTS platform_stats")
         conn.execute(
             """
@@ -142,6 +144,8 @@ def init_db() -> None:
 
         conn.commit()
 
+
+# === Создание/обновление пользователя по tg_id ===
 def upsert_user(
     *,
     tg_id: int,
@@ -166,6 +170,7 @@ def upsert_user(
         conn.commit()
 
 
+# === Получение локали пользователя ===
 def get_user_locale(tg_id: int) -> str | None:
     with _connect() as conn:
         row = conn.execute(
@@ -177,6 +182,7 @@ def get_user_locale(tg_id: int) -> str | None:
         return row["locale"]
 
 
+# === Сохранение локали пользователя ===
 def set_user_locale(tg_id: int, locale: str) -> None:
     with _connect() as conn:
         conn.execute(
@@ -186,6 +192,7 @@ def set_user_locale(tg_id: int, locale: str) -> None:
         conn.commit()
 
 
+# === Получение профиля пользователя по tg_id ===
 def get_user_profile(tg_id: int) -> sqlite3.Row | None:
     with _connect() as conn:
         return conn.execute(
@@ -198,6 +205,7 @@ def get_user_profile(tg_id: int) -> sqlite3.Row | None:
         ).fetchone()
 
 
+# === Пополнение баланса пользователя ===
 def credit_user_balance(tg_id: int, amount: float) -> float | None:
     """
     Увеличивает баланс пользователя на amount.
@@ -224,6 +232,7 @@ def credit_user_balance(tg_id: int, amount: float) -> float | None:
         return float(row["balance"]) if row else None
 
 
+# === Списание средств с баланса (с проверкой достаточности) ===
 def debit_user_balance(tg_id: int, amount: float) -> float | None:
     """
     Atomically subtracts amount from user balance if sufficient.
@@ -250,6 +259,7 @@ def debit_user_balance(tg_id: int, amount: float) -> float | None:
         return float(row["balance"]) if row else None
 
 
+# === Установка TON-кошелька пользователя ===
 def set_user_ton_wallet(tg_id: int, ton_wallet: str) -> None:
     with _connect() as conn:
         conn.execute(
@@ -259,6 +269,7 @@ def set_user_ton_wallet(tg_id: int, ton_wallet: str) -> None:
         conn.commit()
 
 
+# === Установка номера банковской карты пользователя ===
 def set_user_card_number(tg_id: int, card_number: str) -> None:
     with _connect() as conn:
         conn.execute(
@@ -268,6 +279,7 @@ def set_user_card_number(tg_id: int, card_number: str) -> None:
         conn.commit()
 
 
+# === Установка телефона СБП пользователя ===
 def set_user_sbp_phone(tg_id: int, sbp_phone: str) -> None:
     with _connect() as conn:
         conn.execute(
@@ -277,6 +289,7 @@ def set_user_sbp_phone(tg_id: int, sbp_phone: str) -> None:
         conn.commit()
 
 
+# === Получение агрегированной статистики платформы ===
 def get_platform_stats() -> sqlite3.Row:
     with _connect() as conn:
         row = conn.execute(
@@ -284,6 +297,8 @@ def get_platform_stats() -> sqlite3.Row:
         ).fetchone()
         return row
 
+
+# === Генерация короткого публичного идентификатора сделки ===
 _ALPHABET = string.ascii_lowercase + string.digits
 
 
@@ -291,6 +306,7 @@ def _gen_public_id(length: int = 8) -> str:
     return "".join(secrets.choice(_ALPHABET) for _ in range(length))
 
 
+# === Создание новой сделки ===
 def create_deal(tg_id: int, payment_method: str, amount: float, currency: str, item_description: str) -> tuple[int, str]:
     with _connect() as conn:
         public_id = _gen_public_id()
@@ -309,6 +325,8 @@ def create_deal(tg_id: int, payment_method: str, amount: float, currency: str, i
                 public_id = _gen_public_id()
         raise RuntimeError("Не удалось сгенерировать уникальный public_id для сделки")
 
+
+# === Получение сделки по внутреннему ID (с опциональной проверкой владельца) ===
 def get_deal(deal_id: int, tg_id: int | None = None) -> sqlite3.Row | None:
     with _connect() as conn:
         if tg_id:
@@ -323,6 +341,7 @@ def get_deal(deal_id: int, tg_id: int | None = None) -> sqlite3.Row | None:
             ).fetchone()
 
 
+# === Получение сделки по public_id ===
 def get_deal_by_public_id(public_id: str) -> sqlite3.Row | None:
     with _connect() as conn:
         return conn.execute(
@@ -331,6 +350,7 @@ def get_deal_by_public_id(public_id: str) -> sqlite3.Row | None:
         ).fetchone()
 
 
+# === Привязка покупателя к сделке по public_id ===
 def attach_buyer_to_deal(public_id: str, buyer_tg_id: int) -> bool:
     with _connect() as conn:
         cursor = conn.execute(
@@ -344,6 +364,8 @@ def attach_buyer_to_deal(public_id: str, buyer_tg_id: int) -> bool:
         conn.commit()
         return cursor.rowcount > 0
 
+
+# === Обновление статуса сделки ===
 def update_deal_status(deal_id: int, status: str) -> bool:
     with _connect() as conn:
         cursor = conn.execute(
@@ -353,6 +375,8 @@ def update_deal_status(deal_id: int, status: str) -> bool:
         conn.commit()
         return cursor.rowcount > 0
 
+
+# === Обновление статистики пользователя по завершённой сделке ===
 def update_user_stats(tg_id: int, deal_id: int) -> None:
     with _connect() as conn:
         row = conn.execute(

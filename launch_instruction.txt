@@ -1,0 +1,13 @@
+//команды для запуска
+
+python -m venv venv
+source venv/bin/activate
+
+pip install -r requirements.txt
+
+export BOT_TOKEN="твой_токен"
+
+python main.py
+
+//команды после остановки
+deactivate

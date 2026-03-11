@@ -1,6 +1,7 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 
+# === Главное меню бота ===
 def main_menu_kb(locale: str = "ru") -> InlineKeyboardMarkup:
     if locale == "en":
         return InlineKeyboardMarkup(
@@ -42,6 +43,7 @@ def main_menu_kb(locale: str = "ru") -> InlineKeyboardMarkup:
     )
 
 
+# === Клавиатуры выбора языка ===
 def language_choice_kb() -> InlineKeyboardMarkup:
     return language_choice_kb_with_origin()
 
@@ -56,6 +58,7 @@ def language_choice_kb_with_origin(origin: str = "start") -> InlineKeyboardMarku
         ]
     )
 
+
 def language_choice_kb_with_back_to_menu(origin: str = "start") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -67,6 +70,8 @@ def language_choice_kb_with_back_to_menu(origin: str = "start") -> InlineKeyboar
         ]
     )
 
+
+# === Кнопка «Назад в меню» из раздела «О боте» и других экранов ===
 def about_return_to_menu(locale: str = "ru") -> InlineKeyboardMarkup:
     if locale == "en":
         return InlineKeyboardMarkup(
@@ -82,6 +87,7 @@ def about_return_to_menu(locale: str = "ru") -> InlineKeyboardMarkup:
     )
 
 
+# === Клавиатура профиля пользователя ===
 def profile_kb(locale: str = "ru") -> InlineKeyboardMarkup:
     if locale == "en":
         return InlineKeyboardMarkup(
@@ -99,6 +105,7 @@ def profile_kb(locale: str = "ru") -> InlineKeyboardMarkup:
     )
 
 
+# === Меню управления реквизитами (TON, карта, СБП) ===
 def requisites_menu_kb(locale: str = "ru") -> InlineKeyboardMarkup:
     if locale == "en":
         return InlineKeyboardMarkup(
@@ -119,6 +126,8 @@ def requisites_menu_kb(locale: str = "ru") -> InlineKeyboardMarkup:
         ]
     )
 
+
+# === Выбор метода оплаты при создании сделки ===
 def select_payment_metod(locale: str = "ru", has_ton: bool = True, has_card: bool = True, has_sbp: bool = True) -> InlineKeyboardMarkup:
     keyboard = []
 
@@ -140,6 +149,7 @@ def select_payment_metod(locale: str = "ru", has_ton: bool = True, has_card: boo
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
+# === Кнопка подтверждения оплаты сделки покупателем ===
 def buyer_deal_confirm_kb(public_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
